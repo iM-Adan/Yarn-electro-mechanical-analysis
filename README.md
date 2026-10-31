@@ -17,6 +17,7 @@ A Streamlit application for synchronizing tensile-test data with multimeter resi
 
 ## Requirements
 
+
 Use Python 3.10–3.12 with the versions pinned in [`requirement.txt`](requirement.txt). Python 3.14 may not be compatible with all of these pinned package versions.
 
 ## Install and run
