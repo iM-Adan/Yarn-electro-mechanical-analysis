@@ -13,7 +13,9 @@ A Streamlit application for synchronizing tensile-test data with multimeter resi
 
 ## Demo video
 
-[▶ Watch the demo video](demo/demo.mp4)
+<video src="https://raw.githubusercontent.com/iM-Adan/Yarn-electro-mechanical-analysis/main/demo/demo.mp4" controls width="100%">
+  Your browser does not support embedded video. [Download the demo video](demo/demo.mp4).
+</video>
 
 ## Requirements
 
