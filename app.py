@@ -177,7 +177,7 @@ for note in set(misrouted_notes):
 
 if instron_dict and dmm_dict:
     st.subheader("Configure Specimens for Comparison")
-    num_tests = st.number_input("Number of specimens/tests to compare", min_value=1, max_value=12, value=1)
+    num_tests = st.number_input("Number of specimens/tests to compare", min_value=1, max_value=50, value=1)
 
     tests_config = []
     inst_keys = list(instron_dict.keys())
@@ -191,9 +191,9 @@ if instron_dict and dmm_dict:
             dmm_name = c3.selectbox("Multimeter CSV", dmm_keys, index=min(i, len(dmm_keys)-1), key=f"dmm_{i}")
 
             c4, c5, c6, c7 = st.columns(4)
-            tex = c4.number_input("Linear Density (tex)", value=200.0, min_value=1.0, step=10.0, key=f"tex_{i}")
-            gauge_mm = c5.number_input("Gauge Length (mm)", value=200.0, min_value=1.0, step=10.0, key=f"gl_{i}")
-            offset = c6.number_input("Sync Offset: Instron Start in DMM Time (s)", value=1.20, min_value=-30.0, max_value=30.0, step=0.1, key=f"off_{i}")
+            tex = c4.number_input("Linear Density (tex)", value=531.11, min_value=1.0, step=10.0, key=f"tex_{i}")
+            gauge_mm = c5.number_input("Gauge Length (mm)", value=180.0, min_value=1.0, step=10.0, key=f"gl_{i}")
+            offset = c6.number_input("Sync Offset: Instron Start in DMM Time (s)", value=0.0, min_value=-30.0, max_value=30.0, step=0.1, key=f"off_{i}")
             auto_sync = c7.checkbox("Auto-align peak break to R spike", value=False, key=f"auto_{i}")
 
             tests_config.append({
@@ -213,10 +213,12 @@ if instron_dict and dmm_dict:
     # Setup figures
     fig_curve, (ax_dr, ax_norm_r) = plt.subplots(1, 2, figsize=(14, 5))
     fig_damage, (ax_dmg_time, ax_dmg_load) = plt.subplots(1, 2, figsize=(14, 5))
+    fig_res_time, ax_res_time = plt.subplots(figsize=(10, 5))
 
     colors = plt.cm.tab10.colors
     summary_rows = []
     event_logs = []
+    specimen_time_figures = []
 
     for idx, cfg in enumerate(tests_config):
         color = colors[idx % len(colors)]
@@ -249,6 +251,10 @@ if instron_dict and dmm_dict:
         offset = cfg["offset"]
         peak_load_idx = int(np.argmax(load_N))
         t_break_mech = t_mech[peak_load_idx]
+        positive_load_indices = np.flatnonzero(load_N > 0)
+        pull_onset_time = (
+            float(t_mech[positive_load_indices[0]]) if len(positive_load_indices) else None
+        )
         if cfg["auto_sync"]:
             d_res = np.gradient(res_raw, t_elec)
             spike_elec_idx = int(np.argmax(d_res))
@@ -277,6 +283,71 @@ if instron_dict and dmm_dict:
         cutoff_idx = int(peak_load_idx * (1.0 - pre_break_trim_pct)) if pre_break_trim_pct > 0 else peak_load_idx
         active_indices = np.arange(len(t_mech)) <= cutoff_idx
         mask_active = valid_mask & active_indices
+
+        if pull_onset_time is not None:
+            time_origin = pull_onset_time
+            onset_description = "first positive load"
+        else:
+            time_origin = float(t_mech[0])
+            onset_description = "specimen start (no positive load)"
+            st.warning(
+                f"No positive Instron load found for {label}; using specimen start as the time origin."
+            )
+
+        fig_specimen, ax_load = plt.subplots(figsize=(6, 4))
+        ax_resistance = ax_load.twinx()
+        load_window = (
+            (t_mech >= time_origin)
+            & (np.arange(len(t_mech)) <= cutoff_idx)
+        )
+        load_line, = ax_load.plot(
+            t_mech[load_window] - time_origin,
+            load_N[load_window],
+            color="tab:blue",
+            linewidth=1.8,
+            label="Load (Instron)"
+        )
+        pull_onset_dmm_time = time_origin + offset
+        analysis_end_dmm_time = t_mech[cutoff_idx] + offset
+        trace_window = (
+            (t_elec >= pull_onset_dmm_time)
+            & (t_elec <= analysis_end_dmm_time)
+        )
+        if np.any(trace_window):
+            trace_order = np.argsort(t_elec[trace_window])
+            resistance_line, = ax_resistance.plot(
+                t_elec[trace_window][trace_order] - pull_onset_dmm_time,
+                res_raw[trace_window][trace_order],
+                color="tab:red",
+                linewidth=1.8,
+                label="Resistance (DMM trace)"
+            )
+            lines = [load_line, resistance_line]
+            if pull_onset_time is None:
+                ax_load.set_title(f"{label}: Load & Resistance vs. Time\n({onset_description})")
+            else:
+                ax_load.set_title(f"{label}: Load & Resistance vs. Time Since Pull Onset")
+        else:
+            lines = [load_line]
+            ax_load.set_title(f"{label}: Load & Resistance vs. Time\n({onset_description})")
+            st.warning(
+                f"No DMM trace samples fall within the analysis window for {label}."
+            )
+
+        x_axis_label = (
+            "Time Since Pull Onset (s)"
+            if pull_onset_time is not None
+            else "Time Since Specimen Start (s)"
+        )
+        ax_load.set_xlabel(x_axis_label)
+        ax_load.set_ylabel("Load (N)", color="tab:blue")
+        ax_resistance.set_ylabel("Resistance (Ω)", color="tab:red")
+        ax_load.tick_params(axis="y", labelcolor="tab:blue")
+        ax_resistance.tick_params(axis="y", labelcolor="tab:red")
+        ax_load.grid(True, alpha=0.3)
+        ax_load.legend(lines, [line.get_label() for line in lines], loc="best")
+        fig_specimen.tight_layout()
+        specimen_time_figures.append(fig_specimen)
 
         if np.sum(mask_active) < 5:
             st.warning(f"Not enough overlapping time data for {label}. Check your Sync Offset.")
@@ -349,6 +420,22 @@ if instron_dict and dmm_dict:
         # Plot 2B: ΔR/R0 directly against Tenacity (cN/tex)
         ax_dmg_load.plot(tenacity_act, dr_r0_act, label=label, color=color, linewidth=2)
 
+        # Plot 3: Raw DMM trace resistance vs. elapsed time from pull onset
+        if pull_onset_time is not None:
+            if np.any(trace_window):
+                trace_order = np.argsort(t_elec[trace_window])
+                ax_res_time.plot(
+                    t_elec[trace_window][trace_order] - pull_onset_dmm_time,
+                    res_raw[trace_window][trace_order],
+                    label=label,
+                    color=color,
+                    linewidth=2
+                )
+            else:
+                st.warning(f"Cannot plot resistance since pull onset for {label}: no DMM trace samples in the analysis window.")
+        else:
+            st.warning(f"Cannot plot resistance since pull onset for {label}: Instron load never exceeds zero.")
+
         summary_rows.append({
             "Specimen": label,
             "R₀ (Ω)": round(R0, 2),
@@ -396,15 +483,33 @@ if instron_dict and dmm_dict:
     ax_dmg_load.legend()
     fig_damage.tight_layout()
 
+    ax_res_time.set_title("3. Resistance (Ω) vs. Time Since Pull Onset")
+    ax_res_time.set_xlabel("Time Since Pull Onset (s)")
+    ax_res_time.set_ylabel("Resistance (Ω)")
+    ax_res_time.grid(True, alpha=0.3)
+    if ax_res_time.lines:
+        ax_res_time.legend()
+    fig_res_time.tight_layout()
+
     st.subheader("1. Curve Shape, Turning Strain & Normalized Resistivity")
     st.pyplot(fig_curve)
 
     st.subheader("2. Mechanical Damage Tracking & Load-Drop Alignment")
     st.pyplot(fig_damage)
 
+    st.subheader("3. Resistance vs. Time Since Pull Onset")
+    st.pyplot(fig_res_time)
+
+    if specimen_time_figures:
+        st.subheader("4. Per-Specimen Load and Resistance vs. Time")
+        specimen_columns = st.columns(3)
+        for idx, fig_specimen in enumerate(specimen_time_figures):
+            with specimen_columns[idx % 3]:
+                st.pyplot(fig_specimen, use_container_width=True)
+
     if summary_rows:
         df_summary = pd.DataFrame(summary_rows)
-        st.subheader("3. Complete Electromechanical & Sensor Viability Matrix")
+        st.subheader("5. Complete Electromechanical & Sensor Viability Matrix")
         st.dataframe(df_summary, use_container_width=True)
 
         if len(df_summary) > 1:
@@ -426,7 +531,7 @@ if instron_dict and dmm_dict:
         )
 
     if event_logs:
-        st.subheader("4. Detected Mid-Test Load-Drop Events (Slippage / Fiber Fracture)")
+        st.subheader("6. Detected Mid-Test Load-Drop Events (Slippage / Fiber Fracture)")
         st.dataframe(pd.DataFrame(event_logs), use_container_width=True)
 elif raw_instron_uploads or raw_dmm_uploads:
     st.warning("Please upload at least one Instron CSV (e.g., `Specimen_RawData_2.csv`) AND one Multimeter CSV (e.g., `Trace 1.csv`).")

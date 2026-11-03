@@ -4,10 +4,10 @@ A Streamlit application for synchronizing tensile-test data with multimeter resi
 
 ## Features
 
-- Upload multiple Instron and multimeter CSV files and configure up to 12 specimens.
+- Upload multiple Instron and multimeter CSV files and configure up to 50 specimens.
 - Identify and route uploaded files using their headers.
 - Set specimen label, linear density, gauge length, and time offset; optionally auto-align the peak load with the steepest resistance increase.
-- Review relative resistance versus strain, normalized resistivity versus strain, and tenacity/damage plots.
+- Review relative resistance versus strain, normalized resistivity versus strain, batch resistance versus time since pull onset, and per-specimen load/resistance overlay plots.
 - Inspect sensor and mechanical metrics, including turning strain, gauge factor, linearity, strain resolution, work of rupture, and recovery/hysteresis where applicable.
 - Download the comparison summary as a CSV.
 
@@ -64,3 +64,7 @@ The export should contain a header with a time column containing `Time` (typical
 5. Review the plots, comparison metrics, and detected load-drop events. Use **Download Complete Summary Metrics CSV** to export the summary table.
 
 Resistance is interpolated onto the Instron time points only where the measurement timelines overlap. If too few points overlap, adjust the sync offset or check the input files.
+
+The resistance-versus-time plot uses raw resistance samples from each specimen's DMM trace. The first positive Instron load, aligned using the configured sync offset, sets time zero; samples are shown through the selected pre-break analysis window.
+
+Each specimen also has its own load/resistance overlay graph, arranged in three columns. The load uses the Instron data, and resistance uses raw DMM trace samples on a secondary y-axis; both are aligned to the same onset-relative time axis. If no positive load is present, the specimen recording start is used as the time origin.
