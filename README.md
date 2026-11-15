@@ -7,7 +7,8 @@ A Streamlit application for synchronizing tensile-test data with multimeter resi
 - Upload multiple Instron and multimeter CSV files and configure up to 50 specimens.
 - Identify and route uploaded files using their headers.
 - Set specimen label, linear density, gauge length, and time offset; optionally auto-align the peak load with the steepest resistance increase.
-- Review relative resistance versus strain, normalized resistivity versus strain, batch resistance versus time since pull onset, and per-specimen load/resistance overlay plots.
+- Review interactive relative-resistance, normalized-resistivity, damage-tracking, resistance-time, and per-specimen load/resistance plots.
+- Upload separate datasets for **Full analysis** and **Plot traces only**; switching modes preserves each mode's files. Plot-only mode shows complete data by default, with an optional time cut, a combined plot, and a separate interactive plot for each trace.
 - Inspect sensor and mechanical metrics, including turning strain, gauge factor, linearity, strain resolution, work of rupture, and recovery/hysteresis where applicable.
 - Download the comparison summary as a CSV.
 

@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="EM Desk", layout="wide")
 st.title("Electromechanical Yarn Strain Sensor Analysis Desk")
@@ -9,6 +11,13 @@ st.markdown(
     r"Complete diagnostic suite evaluating **Curve Shape & Turning Strain**, **Monotonic Linearity ($R^2$) & Resolution**, "
     r"**Load-Drop vs. Resistance-Event Alignment**, **Normalized Resistivity ($\Omega\cdot\text{den}/\text{cm}$) & Tenacity ($\text{cN}/\text{tex}$)**, "
     r"**Cyclic Hysteresis/Recovery**, and **$R_0$ Quality Screening**."
+)
+
+app_mode = st.radio(
+    "Mode",
+    ["Full analysis", "Plot traces only"],
+    horizontal=True,
+    help="Plot uploaded Instron or multimeter traces interactively without calculating comparison metrics.",
 )
 
 
@@ -87,6 +96,16 @@ def parse_instron(file_buf):
 
     file_buf.seek(0)
     df = pd.read_csv(file_buf, skiprows=skip_rows)
+    column_map = {}
+    for column in df.columns:
+        normalized = column.strip()
+        if normalized.startswith("Time measurement"):
+            column_map[column] = "Time (s)"
+        elif normalized.startswith("Primary load measurement"):
+            column_map[column] = "Primary load (N)"
+        elif normalized.startswith("Tensile extension"):
+            column_map[column] = "Tensile extension (mm)"
+    df = df.rename(columns=column_map)
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna(subset=[df.columns[0]]).reset_index(drop=True)
@@ -146,10 +165,48 @@ def fit_metrics(x_strain_frac, y_dr_r0):
     return slope, r2, rmse
 
 
-# 1. File Uploaders (Auto-routes files even if dropped into the wrong box)
-col_u1, col_u2 = st.columns(2)
-raw_instron_uploads = col_u1.file_uploader("Upload Instron Tensile CSVs", type=['csv'], accept_multiple_files=True)
-raw_dmm_uploads = col_u2.file_uploader("Upload Multimeter (DMM) CSVs", type=['csv'], accept_multiple_files=True)
+# Keep both upload groups rendered so each mode retains its own files when switching modes.
+analysis_uploads = st.expander(
+    "Full analysis files", expanded=app_mode == "Full analysis"
+)
+plot_uploads = st.expander(
+    "Plot traces only files", expanded=app_mode == "Plot traces only"
+)
+with analysis_uploads:
+    analysis_col_inst, analysis_col_dmm = st.columns(2)
+    analysis_instron_uploads = analysis_col_inst.file_uploader(
+        "Upload Instron Tensile CSVs",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="analysis_instron_uploads",
+    )
+    analysis_dmm_uploads = analysis_col_dmm.file_uploader(
+        "Upload Multimeter (DMM) CSVs",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="analysis_dmm_uploads",
+    )
+with plot_uploads:
+    plot_col_inst, plot_col_dmm = st.columns(2)
+    plot_instron_uploads = plot_col_inst.file_uploader(
+        "Upload Instron Tensile CSVs",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="plot_instron_uploads",
+    )
+    plot_dmm_uploads = plot_col_dmm.file_uploader(
+        "Upload Multimeter (DMM) CSVs",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="plot_dmm_uploads",
+    )
+
+if app_mode == "Full analysis":
+    raw_instron_uploads = analysis_instron_uploads
+    raw_dmm_uploads = analysis_dmm_uploads
+else:
+    raw_instron_uploads = plot_instron_uploads
+    raw_dmm_uploads = plot_dmm_uploads
 
 instron_dict = {}
 dmm_dict = {}
@@ -175,7 +232,146 @@ for f in (raw_instron_uploads or []) + (raw_dmm_uploads or []):
 for note in set(misrouted_notes):
     st.info(note)
 
-if instron_dict and dmm_dict:
+if app_mode == "Plot traces only":
+    parsed_instron = {}
+    parsed_dmm = {}
+
+    for name, file_buf in instron_dict.items():
+        try:
+            parsed_instron[name] = parse_instron(file_buf)
+        except Exception as e:
+            st.error(f"Could not read Instron trace '{name}': {e}")
+
+    for name, file_buf in dmm_dict.items():
+        try:
+            parsed_dmm[name] = parse_dmm(file_buf)
+        except Exception as e:
+            st.error(f"Could not read multimeter trace '{name}': {e}")
+
+    trace_options = []
+    if parsed_dmm:
+        trace_options.append("Resistance (DMM)")
+    if parsed_instron:
+        available_columns = {
+            column
+            for df in parsed_instron.values()
+            for column in df.columns
+        }
+        for label, column in (
+            ("Load (Instron)", "Primary load (N)"),
+            ("Extension (Instron)", "Tensile extension (mm)"),
+            ("Composite strain (Instron)", "Composite strain"),
+        ):
+            if column in available_columns:
+                trace_options.append(label)
+
+    if trace_options:
+        selected_trace = st.selectbox("Trace signal to plot", trace_options)
+        if selected_trace == "Resistance (DMM)":
+            traces = [
+                (name, np.asarray(time_s), np.asarray(resistance))
+                for name, (time_s, resistance) in parsed_dmm.items()
+            ]
+            x_label = "Time (s)"
+            y_label = "Resistance (Ω)"
+        else:
+            column_by_signal = {
+                "Load (Instron)": ("Primary load (N)", "Load (N)"),
+                "Extension (Instron)": ("Tensile extension (mm)", "Extension (mm)"),
+                "Composite strain (Instron)": ("Composite strain", "Composite strain"),
+            }
+            column, y_label = column_by_signal[selected_trace]
+            traces = [
+                (name, df["Time (s)"].to_numpy(), df[column].to_numpy())
+                for name, df in parsed_instron.items()
+                if column in df.columns
+            ]
+            x_label = "Time (s)"
+
+        finite_times = [
+            time[np.isfinite(time)]
+            for _, time, _ in traces
+            if np.issubdtype(time.dtype, np.number) and np.isfinite(time).any()
+        ]
+        if not finite_times:
+            st.warning("The selected trace has no valid numeric time values.")
+        else:
+            time_min = float(min(np.min(time) for time in finite_times))
+            time_max = float(max(np.max(time) for time in finite_times))
+            time_mode = st.radio(
+                "Time range",
+                ["Complete data (no time cut)", "Cut to time range"],
+                horizontal=True,
+                help="Complete data plots every sample in each uploaded trace. Choose a time range only to intentionally crop the traces.",
+            )
+            if time_mode == "Cut to time range" and time_min < time_max:
+                range_col1, range_col2 = st.columns(2)
+                range_start = range_col1.number_input(
+                    "Start time (s)",
+                    min_value=time_min,
+                    max_value=time_max,
+                    value=time_min,
+                    key="trace_range_start",
+                )
+                range_end = range_col2.number_input(
+                    "End time (s)",
+                    min_value=time_min,
+                    max_value=time_max,
+                    value=time_max,
+                    key="trace_range_end",
+                )
+                if range_start > range_end:
+                    st.error("Start time must be less than or equal to end time.")
+                    traces_to_plot = []
+                else:
+                    traces_to_plot = []
+                    for name, time, values in traces:
+                        if not np.issubdtype(time.dtype, np.number):
+                            continue
+                        mask = (
+                            np.isfinite(time)
+                            & (time >= range_start)
+                            & (time <= range_end)
+                        )
+                        if np.any(mask):
+                            traces_to_plot.append((name, time[mask], values[mask]))
+            else:
+                traces_to_plot = traces
+
+            if traces_to_plot:
+                combined_fig = go.Figure()
+                for name, time, values in traces_to_plot:
+                    combined_fig.add_trace(
+                        go.Scatter(x=time, y=values, mode="lines", name=name)
+                    )
+                combined_fig.update_layout(
+                    title=f"Combined {selected_trace} traces",
+                    xaxis_title=x_label,
+                    yaxis_title=y_label,
+                    hovermode="x unified",
+                )
+                st.subheader("Combined interactive graph")
+                st.plotly_chart(combined_fig, use_container_width=True)
+
+                st.subheader("Individual interactive graphs")
+                for name, time, values in traces_to_plot:
+                    individual_fig = go.Figure(
+                        go.Scatter(x=time, y=values, mode="lines", name=name)
+                    )
+                    individual_fig.update_layout(
+                        title=name,
+                        xaxis_title=x_label,
+                        yaxis_title=y_label,
+                        hovermode="x",
+                    )
+                    st.plotly_chart(individual_fig, use_container_width=True)
+            elif time_mode == "Cut to time range":
+                st.warning("The selected time range contains no samples.")
+    elif raw_instron_uploads or raw_dmm_uploads:
+        st.warning("No uploaded files contain a readable trace for plotting.")
+    else:
+        st.info("Upload one or more Instron or multimeter CSV files to plot their traces.")
+elif instron_dict and dmm_dict:
     st.subheader("Configure Specimens for Comparison")
     num_tests = st.number_input("Number of specimens/tests to compare", min_value=1, max_value=50, value=1)
 
@@ -210,12 +406,25 @@ if instron_dict and dmm_dict:
     baseline_window_s = st.sidebar.slider("Unloaded Baseline Noise Window (s)", 0.5, 5.0, 2.0, 0.5)
     pre_break_trim_pct = st.sidebar.slider("Trim post-fracture tail after peak load (%)", 0.0, 1.0, 0.0, 0.05)
 
-    # Setup figures
-    fig_curve, (ax_dr, ax_norm_r) = plt.subplots(1, 2, figsize=(14, 5))
-    fig_damage, (ax_dmg_time, ax_dmg_load) = plt.subplots(1, 2, figsize=(14, 5))
-    fig_res_time, ax_res_time = plt.subplots(figsize=(10, 5))
+    fig_curve = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=(
+            "1A. Relative Resistance (ΔR/R₀) vs. Strain",
+            "1B. Normalized Resistivity vs. Strain",
+        ),
+    )
+    fig_damage = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=(
+            "2A. Tenacity vs. Time",
+            "2B. Relative Resistance vs. Tenacity",
+        ),
+    )
+    fig_res_time = go.Figure()
 
-    colors = plt.cm.tab10.colors
+    colors = px.colors.qualitative.Plotly
     summary_rows = []
     event_logs = []
     specimen_time_figures = []
@@ -234,9 +443,9 @@ if instron_dict and dmm_dict:
             st.error(f"Error parsing files for {label}: {e}")
             continue
 
-        t_mech = df_mech['Time measurement'].values
-        load_N = df_mech['Primary load measurement'].values
-        ext_mm = df_mech['Tensile extension'].values
+        t_mech = df_mech['Time (s)'].values
+        load_N = df_mech['Primary load (N)'].values
+        ext_mm = df_mech['Tensile extension (mm)'].values
 
         if 'Composite strain' in df_mech.columns and df_mech['Composite strain'].max() > 0:
             strain_frac = df_mech['Composite strain'].values
@@ -294,18 +503,20 @@ if instron_dict and dmm_dict:
                 f"No positive Instron load found for {label}; using specimen start as the time origin."
             )
 
-        fig_specimen, ax_load = plt.subplots(figsize=(6, 4))
-        ax_resistance = ax_load.twinx()
+        fig_specimen = make_subplots(specs=[[{"secondary_y": True}]])
         load_window = (
             (t_mech >= time_origin)
             & (np.arange(len(t_mech)) <= cutoff_idx)
         )
-        load_line, = ax_load.plot(
-            t_mech[load_window] - time_origin,
-            load_N[load_window],
-            color="tab:blue",
-            linewidth=1.8,
-            label="Load (Instron)"
+        fig_specimen.add_trace(
+            go.Scatter(
+                x=t_mech[load_window] - time_origin,
+                y=load_N[load_window],
+                mode="lines",
+                name="Load (Instron)",
+                line={"color": "blue", "width": 1.8},
+            ),
+            secondary_y=False,
         )
         pull_onset_dmm_time = time_origin + offset
         analysis_end_dmm_time = t_mech[cutoff_idx] + offset
@@ -315,21 +526,17 @@ if instron_dict and dmm_dict:
         )
         if np.any(trace_window):
             trace_order = np.argsort(t_elec[trace_window])
-            resistance_line, = ax_resistance.plot(
-                t_elec[trace_window][trace_order] - pull_onset_dmm_time,
-                res_raw[trace_window][trace_order],
-                color="tab:red",
-                linewidth=1.8,
-                label="Resistance (DMM trace)"
+            fig_specimen.add_trace(
+                go.Scatter(
+                    x=t_elec[trace_window][trace_order],
+                    y=res_raw[trace_window][trace_order],
+                    mode="lines",
+                    name="Resistance (DMM trace)",
+                    line={"color": "red", "width": 1.8},
+                ),
+                secondary_y=True,
             )
-            lines = [load_line, resistance_line]
-            if pull_onset_time is None:
-                ax_load.set_title(f"{label}: Load & Resistance vs. Time\n({onset_description})")
-            else:
-                ax_load.set_title(f"{label}: Load & Resistance vs. Time Since Pull Onset")
         else:
-            lines = [load_line]
-            ax_load.set_title(f"{label}: Load & Resistance vs. Time\n({onset_description})")
             st.warning(
                 f"No DMM trace samples fall within the analysis window for {label}."
             )
@@ -339,14 +546,15 @@ if instron_dict and dmm_dict:
             if pull_onset_time is not None
             else "Time Since Specimen Start (s)"
         )
-        ax_load.set_xlabel(x_axis_label)
-        ax_load.set_ylabel("Load (N)", color="tab:blue")
-        ax_resistance.set_ylabel("Resistance (Ω)", color="tab:red")
-        ax_load.tick_params(axis="y", labelcolor="tab:blue")
-        ax_resistance.tick_params(axis="y", labelcolor="tab:red")
-        ax_load.grid(True, alpha=0.3)
-        ax_load.legend(lines, [line.get_label() for line in lines], loc="best")
-        fig_specimen.tight_layout()
+        fig_specimen.update_layout(
+            title=f"{label}: Load & Resistance vs. Time",
+            hovermode="x unified",
+        )
+        fig_specimen.update_xaxes(title_text=x_axis_label, showgrid=True)
+        fig_specimen.update_yaxes(title_text="Load (N)", secondary_y=False)
+        fig_specimen.update_yaxes(
+            title_text="Resistance (Ω)", secondary_y=True, showgrid=False
+        )
         specimen_time_figures.append(fig_specimen)
 
         if np.sum(mask_active) < 5:
@@ -405,31 +613,92 @@ if instron_dict and dmm_dict:
                 "Local ΔR/R₀": round(float(dr_r0_act[dp]), 3)
             })
 
-        # Plot 1A: ΔR/R0 vs Strain (%) with Turning Strain marker
-        ax_dr.plot(strain_pct_act, dr_r0_act, label=label, color=color, linewidth=2)
-        ax_dr.plot(turning_strain_pct, turning_dr_r0, marker='o', markersize=8, color=color)
+        fig_curve.add_trace(
+            go.Scatter(
+                x=strain_pct_act,
+                y=dr_r0_act,
+                mode="lines",
+                name=label,
+                line={"color": color, "width": 2},
+            ),
+            row=1,
+            col=1,
+        )
+        fig_curve.add_trace(
+            go.Scatter(
+                x=[turning_strain_pct],
+                y=[turning_dr_r0],
+                mode="markers",
+                name=f"{label} turning strain",
+                marker={"color": color, "size": 9},
+                showlegend=False,
+            ),
+            row=1,
+            col=1,
+        )
 
-        # Plot 1B: Normalized Linear Resistivity (Ω·den/cm) vs Strain (%)
-        ax_norm_r.plot(strain_pct_act, norm_res_act, label=label, color=color, linewidth=2)
+        fig_curve.add_trace(
+            go.Scatter(
+                x=strain_pct_act,
+                y=norm_res_act,
+                mode="lines",
+                name=label,
+                line={"color": color, "width": 2},
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+        )
 
-        # Plot 2A: Tenacity vs Time (with load-drop markers)
-        ax_dmg_time.plot(t_act, tenacity_act, label=f"{label} Tenacity", color=color, linewidth=1.8)
+        fig_damage.add_trace(
+            go.Scatter(
+                x=t_act,
+                y=tenacity_act,
+                mode="lines",
+                name=f"{label} Tenacity",
+                line={"color": color, "width": 1.8},
+            ),
+            row=1,
+            col=1,
+        )
         if len(drop_peaks) > 0:
-            ax_dmg_time.scatter(t_act[drop_peaks], tenacity_act[drop_peaks], color='red', zorder=5, s=40, marker='x')
+            fig_damage.add_trace(
+                go.Scatter(
+                    x=t_act[drop_peaks],
+                    y=tenacity_act[drop_peaks],
+                    mode="markers",
+                    name=f"{label} load-drop events",
+                    marker={"color": "red", "size": 9, "symbol": "x"},
+                ),
+                row=1,
+                col=1,
+            )
 
-        # Plot 2B: ΔR/R0 directly against Tenacity (cN/tex)
-        ax_dmg_load.plot(tenacity_act, dr_r0_act, label=label, color=color, linewidth=2)
+        fig_damage.add_trace(
+            go.Scatter(
+                x=tenacity_act,
+                y=dr_r0_act,
+                mode="lines",
+                name=label,
+                line={"color": color, "width": 2},
+                showlegend=False,
+            ),
+            row=1,
+            col=2,
+        )
 
         # Plot 3: Raw DMM trace resistance vs. elapsed time from pull onset
         if pull_onset_time is not None:
             if np.any(trace_window):
                 trace_order = np.argsort(t_elec[trace_window])
-                ax_res_time.plot(
-                    t_elec[trace_window][trace_order] - pull_onset_dmm_time,
-                    res_raw[trace_window][trace_order],
-                    label=label,
-                    color=color,
-                    linewidth=2
+                fig_res_time.add_trace(
+                    go.Scatter(
+                        x=t_elec[trace_window][trace_order] - pull_onset_dmm_time,
+                        y=res_raw[trace_window][trace_order],
+                        mode="lines",
+                        name=label,
+                        line={"color": color, "width": 2},
+                    )
                 )
             else:
                 st.warning(f"Cannot plot resistance since pull onset for {label}: no DMM trace samples in the analysis window.")
@@ -454,58 +723,48 @@ if instron_dict and dmm_dict:
             "Recovery / Hysteresis": cyclic_status
         })
 
-    # Format Figure 1
-    ax_dr.axhline(0, color='gray', linestyle=':', alpha=0.6)
-    ax_dr.set_title("1A. Relative Resistance (ΔR/R₀) vs. Strain (Dots = Turning Strain)")
-    ax_dr.set_xlabel("Strain (%)")
-    ax_dr.set_ylabel("ΔR/R₀")
-    ax_dr.grid(True, alpha=0.3)
-    ax_dr.legend()
+    fig_curve.add_hline(y=0, line_dash="dot", line_color="gray", row=1, col=1)
+    fig_curve.update_xaxes(title_text="Strain (%)", showgrid=True)
+    fig_curve.update_yaxes(title_text="ΔR/R₀", showgrid=True, row=1, col=1)
+    fig_curve.update_yaxes(
+        title_text="Normalized Resistance (Ω·den/cm)", showgrid=True, row=1, col=2
+    )
+    fig_curve.update_layout(hovermode="x unified", height=500)
 
-    ax_norm_r.set_title("1B. Normalized Resistivity (Ω·den/cm) vs. Strain")
-    ax_norm_r.set_xlabel("Strain (%)")
-    ax_norm_r.set_ylabel("Normalized Resistance (Ω·den/cm)")
-    ax_norm_r.grid(True, alpha=0.3)
-    ax_norm_r.legend()
-    fig_curve.tight_layout()
+    fig_damage.update_xaxes(showgrid=True, row=1, col=1, title_text="Time (s)")
+    fig_damage.update_yaxes(
+        showgrid=True, row=1, col=1, title_text="Tenacity (cN/tex)"
+    )
+    fig_damage.update_xaxes(
+        showgrid=True, row=1, col=2, title_text="Tenacity (cN/tex)"
+    )
+    fig_damage.update_yaxes(showgrid=True, row=1, col=2, title_text="ΔR/R₀")
+    fig_damage.update_layout(hovermode="closest", height=500)
 
-    # Format Figure 2
-    ax_dmg_time.set_title("2A. Tenacity (cN/tex) vs. Time (Red 'X' = Load-Drop Events)")
-    ax_dmg_time.set_xlabel("Time (s)")
-    ax_dmg_time.set_ylabel("Tenacity (cN/tex)")
-    ax_dmg_time.grid(True, alpha=0.3)
-    ax_dmg_time.legend()
-
-    ax_dmg_load.set_title("2B. Damage Tracking: ΔR/R₀ vs. Tenacity (cN/tex)")
-    ax_dmg_load.set_xlabel("Tenacity (cN/tex)")
-    ax_dmg_load.set_ylabel("ΔR/R₀")
-    ax_dmg_load.grid(True, alpha=0.3)
-    ax_dmg_load.legend()
-    fig_damage.tight_layout()
-
-    ax_res_time.set_title("3. Resistance (Ω) vs. Time Since Pull Onset")
-    ax_res_time.set_xlabel("Time Since Pull Onset (s)")
-    ax_res_time.set_ylabel("Resistance (Ω)")
-    ax_res_time.grid(True, alpha=0.3)
-    if ax_res_time.lines:
-        ax_res_time.legend()
-    fig_res_time.tight_layout()
+    fig_res_time.update_layout(
+        title="3. Resistance (Ω) vs. Time Since Pull Onset",
+        xaxis_title="Time Since Pull Onset (s)",
+        yaxis_title="Resistance (Ω)",
+        hovermode="x unified",
+    )
+    fig_res_time.update_xaxes(showgrid=True)
+    fig_res_time.update_yaxes(showgrid=True)
 
     st.subheader("1. Curve Shape, Turning Strain & Normalized Resistivity")
-    st.pyplot(fig_curve)
+    st.plotly_chart(fig_curve, use_container_width=True)
 
     st.subheader("2. Mechanical Damage Tracking & Load-Drop Alignment")
-    st.pyplot(fig_damage)
+    st.plotly_chart(fig_damage, use_container_width=True)
 
     st.subheader("3. Resistance vs. Time Since Pull Onset")
-    st.pyplot(fig_res_time)
+    st.plotly_chart(fig_res_time, use_container_width=True)
 
     if specimen_time_figures:
         st.subheader("4. Per-Specimen Load and Resistance vs. Time")
         specimen_columns = st.columns(3)
         for idx, fig_specimen in enumerate(specimen_time_figures):
             with specimen_columns[idx % 3]:
-                st.pyplot(fig_specimen, use_container_width=True)
+                st.plotly_chart(fig_specimen, use_container_width=True)
 
     if summary_rows:
         df_summary = pd.DataFrame(summary_rows)
