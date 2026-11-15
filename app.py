@@ -1,23 +1,111 @@
+import re
+from io import BytesIO, StringIO
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
+import plotly.io as pio
 from plotly.subplots import make_subplots
 
 st.set_page_config(page_title="EM Desk", layout="wide")
-st.title("Electromechanical Yarn Strain Sensor Analysis Desk")
+pio.templates.default = "plotly_white"
+
 st.markdown(
-    r"Complete diagnostic suite evaluating **Curve Shape & Turning Strain**, **Monotonic Linearity ($R^2$) & Resolution**, "
-    r"**Load-Drop vs. Resistance-Event Alignment**, **Normalized Resistivity ($\Omega\cdot\text{den}/\text{cm}$) & Tenacity ($\text{cN}/\text{tex}$)**, "
-    r"**Cyclic Hysteresis/Recovery**, and **$R_0$ Quality Screening**."
+    """
+    <style>
+    :root {
+        --ink: #172b45;
+        --muted: #52677f;
+        --line: #dce5ef;
+    }
+    .stApp {
+        background: linear-gradient(180deg, #f3f7fb 0%, #fbfcfe 36rem);
+        color: var(--ink);
+    }
+    [data-testid="stHeader"] {
+        background: rgba(243, 247, 251, 0.88);
+    }
+    [data-testid="stMainBlockContainer"] {
+        max-width: 1440px;
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+    }
+    .hero {
+        padding: 1.55rem 1.8rem;
+        margin-bottom: 1.25rem;
+        border: 1px solid #d6e5ed;
+        border-radius: 18px;
+        background: linear-gradient(115deg, #ffffff 0%, #edf6f8 100%);
+        box-shadow: 0 8px 26px rgba(27, 55, 80, 0.06);
+    }
+    .hero h1 {
+        margin: 0 0 0.45rem 0;
+        color: var(--ink);
+        font-size: clamp(1.7rem, 3vw, 2.45rem);
+        font-weight: 750;
+        letter-spacing: -0.035em;
+    }
+    .hero p {
+        max-width: 980px;
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.65;
+    }
+    h2, h3 {
+        color: var(--ink);
+        letter-spacing: -0.02em;
+    }
+    div[data-testid="stExpander"] {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.88);
+    }
+    div[data-testid="stFileUploader"] {
+        padding: 0.5rem;
+        border: 1px dashed #a9bfce;
+        border-radius: 12px;
+        background: #f9fbfd;
+    }
+    div[data-testid="stRadio"] > div {
+        gap: 0.55rem;
+    }
+    div[data-testid="stPlotlyChart"] {
+        padding: 0.35rem;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #ffffff;
+    }
+    [data-testid="stSidebar"] {
+        background: #f0f5f9;
+        border-right: 1px solid var(--line);
+    }
+    .stButton > button {
+        border-radius: 10px;
+        border-color: #b7cbd7;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown(
+    """
+    <section class="hero">
+      <h1>Electromechanical Yarn Analysis Desk</h1>
+      <p>Explore arbitrary CSV data with interactive plots, or run the full electromechanical analysis suite for curve shape,
+      strain resolution, resistivity, load-drop alignment, cyclic recovery, and sensor quality.</p>
+    </section>
+    """,
+    unsafe_allow_html=True,
 )
 
 app_mode = st.radio(
-    "Mode",
+    "Workspace",
     ["Full analysis", "Plot traces only"],
     horizontal=True,
-    help="Plot uploaded Instron or multimeter traces interactively without calculating comparison metrics.",
+    help="Choose between specimen analysis and interactive plotting of arbitrary CSV data.",
 )
 
 
@@ -165,12 +253,106 @@ def fit_metrics(x_strain_frac, y_dr_r0):
     return slope, r2, rmse
 
 
+@st.cache_data(show_spinner=False)
+def parse_plot_csv(file_bytes, file_name):
+    """Read and cache a delimited text file for the generic plotting workspace."""
+    try:
+        text = file_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = file_bytes.decode("cp1252")
+
+    file_buffer = BytesIO(file_bytes)
+    file_buffer.name = file_name
+    file_type = detect_file_type(file_buffer)
+    if file_type == "instron":
+        df = parse_instron(file_buffer)
+    elif file_type == "dmm":
+        header_idx = next(
+            (
+                index
+                for index, line in enumerate(text.splitlines()[:40])
+                if "Time Stamp" in line
+                or ("Resistance" in line and "Records" in line)
+            ),
+            None,
+        )
+        if header_idx is None:
+            raise ValueError(f"Could not locate the data header in '{file_name}'.")
+        df = pd.read_csv(
+            StringIO(text),
+            skiprows=header_idx,
+            sep=None,
+            engine="python",
+            skip_blank_lines=False,
+        )
+    else:
+        df = pd.read_csv(
+            StringIO(text),
+            sep=None,
+            engine="python",
+            skip_blank_lines=False,
+        )
+    df.columns = [
+        str(column).strip() or f"Column {index + 1}"
+        for index, column in enumerate(df.columns)
+    ]
+    if not len(df.columns):
+        raise ValueError("No column headers were found in this CSV.")
+
+    numeric_columns = tuple(
+        column
+        for column in df.columns
+        if pd.to_numeric(df[column], errors="coerce").notna().any()
+    )
+    return df, numeric_columns
+
+
+def infer_plot_x_kind(series, column_name=""):
+    """Identify numeric and date-like X data while keeping other columns categorical."""
+    if pd.api.types.is_numeric_dtype(series):
+        return "numeric"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "datetime"
+
+    non_missing = int(series.notna().sum())
+    if not non_missing:
+        return "category"
+    threshold = max(1, int(np.ceil(non_missing * 0.8)))
+    if pd.to_numeric(series, errors="coerce").notna().sum() >= threshold:
+        return "numeric"
+    date_hints = ("time", "date", "stamp", "timestamp")
+    date_patterns = (
+        r"^\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?(?:[T ].*)?$",
+        r"^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?:[T ].*)?$",
+        r"^\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}",
+        r"^[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}",
+    )
+    date_candidate = any(hint in column_name.lower() for hint in date_hints) or any(
+        re.match(pattern, str(value).strip())
+        for value in series.dropna().head(5)
+        for pattern in date_patterns
+    )
+    if not date_candidate:
+        return "category"
+    if pd.to_datetime(series, errors="coerce", utc=True).notna().sum() >= threshold:
+        return "datetime"
+    return "category"
+
+
+def convert_plot_x(series, kind):
+    if kind == "numeric":
+        return pd.to_numeric(series, errors="coerce")
+    if kind == "datetime":
+        return pd.to_datetime(series, errors="coerce", utc=True).dt.tz_convert(None)
+    return series
+
+
 # Keep both upload groups rendered so each mode retains its own files when switching modes.
 analysis_uploads = st.expander(
     "Full analysis files", expanded=app_mode == "Full analysis"
 )
 plot_uploads = st.expander(
-    "Plot traces only files", expanded=app_mode == "Plot traces only"
+    "Plot graph", expanded=app_mode == "Plot traces only"
 )
 with analysis_uploads:
     analysis_col_inst, analysis_col_dmm = st.columns(2)
@@ -187,26 +369,22 @@ with analysis_uploads:
         key="analysis_dmm_uploads",
     )
 with plot_uploads:
-    plot_col_inst, plot_col_dmm = st.columns(2)
-    plot_instron_uploads = plot_col_inst.file_uploader(
-        "Upload Instron Tensile CSVs",
-        type=["csv"],
-        accept_multiple_files=True,
-        key="plot_instron_uploads",
+    st.caption(
+        "Upload any CSV with a header row. Columns are detected automatically; choose the X and Y axes below."
     )
-    plot_dmm_uploads = plot_col_dmm.file_uploader(
-        "Upload Multimeter (DMM) CSVs",
+    plot_csv_uploads = st.file_uploader(
+        "Upload CSV files",
         type=["csv"],
         accept_multiple_files=True,
-        key="plot_dmm_uploads",
+        key="plot_csv_uploads",
     )
 
 if app_mode == "Full analysis":
     raw_instron_uploads = analysis_instron_uploads
     raw_dmm_uploads = analysis_dmm_uploads
 else:
-    raw_instron_uploads = plot_instron_uploads
-    raw_dmm_uploads = plot_dmm_uploads
+    raw_instron_uploads = []
+    raw_dmm_uploads = []
 
 instron_dict = {}
 dmm_dict = {}
@@ -233,144 +411,362 @@ for note in set(misrouted_notes):
     st.info(note)
 
 if app_mode == "Plot traces only":
-    parsed_instron = {}
-    parsed_dmm = {}
-
-    for name, file_buf in instron_dict.items():
+    plot_csv_frames = {}
+    plot_csv_numeric_columns = {}
+    for file_buf in plot_csv_uploads or []:
+        display_name = file_buf.name
+        duplicate_number = 2
+        while display_name in plot_csv_frames:
+            display_name = f"{file_buf.name} ({duplicate_number})"
+            duplicate_number += 1
         try:
-            parsed_instron[name] = parse_instron(file_buf)
-        except Exception as e:
-            st.error(f"Could not read Instron trace '{name}': {e}")
-
-    for name, file_buf in dmm_dict.items():
-        try:
-            parsed_dmm[name] = parse_dmm(file_buf)
-        except Exception as e:
-            st.error(f"Could not read multimeter trace '{name}': {e}")
-
-    trace_options = []
-    if parsed_dmm:
-        trace_options.append("Resistance (DMM)")
-    if parsed_instron:
-        available_columns = {
-            column
-            for df in parsed_instron.values()
-            for column in df.columns
-        }
-        for label, column in (
-            ("Load (Instron)", "Primary load (N)"),
-            ("Extension (Instron)", "Tensile extension (mm)"),
-            ("Composite strain (Instron)", "Composite strain"),
-        ):
-            if column in available_columns:
-                trace_options.append(label)
-
-    if trace_options:
-        selected_trace = st.selectbox("Trace signal to plot", trace_options)
-        if selected_trace == "Resistance (DMM)":
-            traces = [
-                (name, np.asarray(time_s), np.asarray(resistance))
-                for name, (time_s, resistance) in parsed_dmm.items()
-            ]
-            x_label = "Time (s)"
-            y_label = "Resistance (Ω)"
-        else:
-            column_by_signal = {
-                "Load (Instron)": ("Primary load (N)", "Load (N)"),
-                "Extension (Instron)": ("Tensile extension (mm)", "Extension (mm)"),
-                "Composite strain (Instron)": ("Composite strain", "Composite strain"),
-            }
-            column, y_label = column_by_signal[selected_trace]
-            traces = [
-                (name, df["Time (s)"].to_numpy(), df[column].to_numpy())
-                for name, df in parsed_instron.items()
-                if column in df.columns
-            ]
-            x_label = "Time (s)"
-
-        finite_times = [
-            time[np.isfinite(time)]
-            for _, time, _ in traces
-            if np.issubdtype(time.dtype, np.number) and np.isfinite(time).any()
-        ]
-        if not finite_times:
-            st.warning("The selected trace has no valid numeric time values.")
-        else:
-            time_min = float(min(np.min(time) for time in finite_times))
-            time_max = float(max(np.max(time) for time in finite_times))
-            time_mode = st.radio(
-                "Time range",
-                ["Complete data (no time cut)", "Cut to time range"],
-                horizontal=True,
-                help="Complete data plots every sample in each uploaded trace. Choose a time range only to intentionally crop the traces.",
+            plot_csv_frames[display_name], plot_csv_numeric_columns[display_name] = (
+                parse_plot_csv(file_buf.getvalue(), file_buf.name)
             )
-            if time_mode == "Cut to time range" and time_min < time_max:
-                range_col1, range_col2 = st.columns(2)
-                range_start = range_col1.number_input(
-                    "Start time (s)",
-                    min_value=time_min,
-                    max_value=time_max,
-                    value=time_min,
-                    key="trace_range_start",
+        except (
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+            UnicodeDecodeError,
+            ValueError,
+        ) as error:
+            st.error(f"Could not read `{file_buf.name}`: {error}")
+
+    if plot_csv_frames:
+        selected_files = st.multiselect(
+            "CSV files to plot",
+            options=list(plot_csv_frames),
+            default=[next(iter(plot_csv_frames))],
+            help="Choose one or more files. Combined plots use columns shared by every selected file.",
+            key="generic_plot_files",
+        )
+        if not selected_files:
+            st.info("Select at least one uploaded file to configure the graph.")
+        else:
+            selected_frames = {
+                name: plot_csv_frames[name] for name in selected_files
+            }
+            shared_columns = [
+                column
+                for column in next(iter(selected_frames.values())).columns
+                if all(column in frame.columns for frame in selected_frames.values())
+            ]
+            shared_numeric_columns = [
+                column
+                for column in plot_csv_numeric_columns[selected_files[0]]
+                if all(
+                    column in plot_csv_numeric_columns[name]
+                    for name in selected_files
                 )
-                range_end = range_col2.number_input(
-                    "End time (s)",
-                    min_value=time_min,
-                    max_value=time_max,
-                    value=time_max,
-                    key="trace_range_end",
+            ]
+            x_options = list(shared_columns)
+            row_number_label = "Row number"
+            while row_number_label in x_options:
+                row_number_label += " (generated)"
+            x_options.append(row_number_label)
+
+            if not shared_columns:
+                st.warning(
+                    "The selected files do not share any columns. Select a single file "
+                    "or choose files with a common column."
                 )
-                if range_start > range_end:
-                    st.error("Start time must be less than or equal to end time.")
-                    traces_to_plot = []
-                else:
-                    traces_to_plot = []
-                    for name, time, values in traces:
-                        if not np.issubdtype(time.dtype, np.number):
-                            continue
-                        mask = (
-                            np.isfinite(time)
-                            & (time >= range_start)
-                            & (time <= range_end)
-                        )
-                        if np.any(mask):
-                            traces_to_plot.append((name, time[mask], values[mask]))
+            elif not x_options:
+                st.warning("No common X-axis columns were found in the selected files.")
             else:
-                traces_to_plot = traces
-
-            if traces_to_plot:
-                combined_fig = go.Figure()
-                for name, time, values in traces_to_plot:
-                    combined_fig.add_trace(
-                        go.Scatter(x=time, y=values, mode="lines", name=name)
-                    )
-                combined_fig.update_layout(
-                    title=f"Combined {selected_trace} traces",
-                    xaxis_title=x_label,
-                    yaxis_title=y_label,
-                    hovermode="x unified",
+                default_x = next(
+                    (
+                        column
+                        for column in x_options
+                        if column != row_number_label
+                        and any(
+                            hint in column.lower()
+                            for hint in ("time", "date", "stamp")
+                        )
+                    ),
+                    row_number_label
+                    if row_number_label in x_options
+                    else x_options[0],
                 )
-                st.subheader("Combined interactive graph")
-                st.plotly_chart(combined_fig, use_container_width=True)
+                axis_col_x, axis_col_y = st.columns(2)
+                x_column = axis_col_x.selectbox(
+                    "X axis",
+                    x_options,
+                    index=x_options.index(default_x),
+                    key="generic_plot_x",
+                )
+                y_options = [
+                    column for column in shared_columns if column != x_column
+                ]
+                if not y_options:
+                    st.warning(
+                        "Choose a different X axis or upload a CSV with at least two "
+                        "columns to select a Y axis."
+                    )
+                else:
+                    preferred_y_options = [
+                        column
+                        for column in y_options
+                        if column in shared_numeric_columns
+                    ]
+                    y_default = next(
+                        (
+                            column
+                            for column in preferred_y_options
+                            if any(
+                                hint in column.lower()
+                                for hint in (
+                                    "resistance",
+                                    "load",
+                                    "force",
+                                    "strain",
+                                    "voltage",
+                                    "current",
+                                )
+                            )
+                        ),
+                        (
+                            preferred_y_options[0]
+                            if preferred_y_options
+                            else y_options[0]
+                        ),
+                    )
+                    y_column = axis_col_y.selectbox(
+                        "Y axis",
+                        y_options,
+                        index=y_options.index(y_default),
+                        key="generic_plot_y",
+                    )
+                    x_kind = (
+                        "numeric"
+                        if x_column == row_number_label
+                        else infer_plot_x_kind(
+                            selected_frames[selected_files[0]][x_column],
+                            x_column,
+                        )
+                    )
+                    y_kind = infer_plot_x_kind(
+                        selected_frames[selected_files[0]][y_column],
+                        y_column,
+                    )
+                    plot_series = []
+                    for name, frame in selected_frames.items():
+                        x_values = (
+                            pd.Series(
+                                np.arange(1, len(frame) + 1),
+                                index=frame.index,
+                            )
+                            if x_column == row_number_label
+                            else convert_plot_x(frame[x_column], x_kind)
+                        )
+                        y_values = (
+                            pd.to_numeric(frame[y_column], errors="coerce")
+                            if y_kind == "numeric"
+                            else convert_plot_x(frame[y_column], y_kind)
+                        )
+                        valid = x_values.notna() & y_values.notna()
+                        if x_kind == "numeric":
+                            valid &= np.isfinite(
+                                x_values.to_numpy(dtype=float, na_value=np.nan)
+                            )
+                        if y_kind == "numeric":
+                            valid &= np.isfinite(
+                                y_values.to_numpy(dtype=float, na_value=np.nan)
+                            )
+                        plot_series.append(
+                            (name, x_values, y_values, valid, len(frame))
+                        )
 
-                st.subheader("Individual interactive graphs")
-                for name, time, values in traces_to_plot:
-                    individual_fig = go.Figure(
-                        go.Scatter(x=time, y=values, mode="lines", name=name)
-                    )
-                    individual_fig.update_layout(
-                        title=name,
-                        xaxis_title=x_label,
-                        yaxis_title=y_label,
-                        hovermode="x",
-                    )
-                    st.plotly_chart(individual_fig, use_container_width=True)
-            elif time_mode == "Cut to time range":
-                st.warning("The selected time range contains no samples.")
-    elif raw_instron_uploads or raw_dmm_uploads:
-        st.warning("No uploaded files contain a readable trace for plotting.")
+                    valid_x_values = [
+                        x_values[valid]
+                        for _, x_values, _, valid, _ in plot_series
+                        if valid.any()
+                    ]
+                    range_mode = "Complete data (no cut)"
+                    if x_kind in ("numeric", "datetime"):
+                        range_mode = st.radio(
+                            "X-axis range",
+                            ["Complete data (no cut)", "Choose range"],
+                            horizontal=True,
+                            help="Complete data is shown by default. Choose a range only to crop the selected X-axis values.",
+                            key="generic_plot_range_mode",
+                        )
+                    else:
+                        st.caption(
+                            "All rows are shown. Select a numeric or date-like X axis to filter by range."
+                        )
+                    range_start = None
+                    range_end = None
+                    if valid_x_values and range_mode == "Choose range":
+                        if x_kind == "numeric":
+                            x_min = float(
+                                min(values.min() for values in valid_x_values)
+                            )
+                            x_max = float(
+                                max(values.max() for values in valid_x_values)
+                            )
+                            if x_min < x_max:
+                                range_col1, range_col2 = st.columns(2)
+                                range_start = range_col1.number_input(
+                                    "X-axis start",
+                                    min_value=x_min,
+                                    max_value=x_max,
+                                    value=x_min,
+                                    key="generic_plot_range_start",
+                                )
+                                range_end = range_col2.number_input(
+                                    "X-axis end",
+                                    min_value=x_min,
+                                    max_value=x_max,
+                                    value=x_max,
+                                    key="generic_plot_range_end",
+                                )
+                        elif x_kind == "datetime":
+                            all_dates = pd.concat(valid_x_values)
+                            date_min = all_dates.min().date()
+                            date_max = all_dates.max().date()
+                            if date_min < date_max:
+                                date_range = st.date_input(
+                                    "X-axis date range",
+                                    value=(date_min, date_max),
+                                    min_value=date_min,
+                                    max_value=date_max,
+                                    key="generic_plot_date_range",
+                                )
+                                if isinstance(date_range, tuple) and len(date_range) == 2:
+                                    range_start = pd.Timestamp(date_range[0])
+                                    range_end = (
+                                        pd.Timestamp(date_range[1])
+                                        + pd.Timedelta(days=1)
+                                        - pd.Timedelta(nanoseconds=1)
+                                    )
+                    if (
+                        range_start is not None
+                        and range_end is not None
+                        and range_start > range_end
+                    ):
+                        st.error("The X-axis start must not be after its end.")
+                    else:
+                        x_label = (
+                            "Row number"
+                            if x_column == row_number_label
+                            else x_column
+                        )
+                        combined_fig = go.Figure()
+                        individual_series = []
+                        plotted_count = 0
+                        omitted_count = 0
+                        for name, x_values, y_values, valid, row_count in plot_series:
+                            if range_start is not None and range_end is not None:
+                                valid &= (x_values >= range_start) & (
+                                    x_values <= range_end
+                                )
+                            x_plot = x_values[valid]
+                            y_plot = y_values[valid]
+                            if len(x_plot):
+                                plotted_count += len(x_plot)
+                                omitted_count += row_count - len(x_plot)
+                                trace_type = (
+                                    go.Scattergl
+                                    if x_kind in ("numeric", "datetime")
+                                    and y_kind in ("numeric", "datetime")
+                                    else go.Scatter
+                                )
+                                combined_fig.add_trace(
+                                    trace_type(
+                                        x=x_plot,
+                                        y=y_plot,
+                                        mode="lines",
+                                        name=name,
+                                        connectgaps=False,
+                                    )
+                                )
+                                individual_series.append((name, x_plot, y_plot))
+                            else:
+                                omitted_count += row_count
+
+                        if individual_series:
+                            combined_fig.update_layout(
+                                title=(
+                                    "Interactive graph"
+                                    if len(individual_series) == 1
+                                    else "Combined interactive graph"
+                                ),
+                                xaxis_title=x_label,
+                                yaxis_title=y_column,
+                                hovermode="x unified",
+                                margin={"l": 20, "r": 20, "t": 55, "b": 20},
+                            )
+                            st.plotly_chart(
+                                combined_fig,
+                                use_container_width=True,
+                                config={"displaylogo": False, "scrollZoom": True},
+                            )
+                            st.caption(
+                                f"{plotted_count:,} points plotted; "
+                                f"{omitted_count:,} rows not shown (invalid axis values "
+                                "or outside the selected range)."
+                            )
+                            if len(individual_series) > 1:
+                                show_individual = st.checkbox(
+                                    "Show a separate interactive graph for each file",
+                                    value=len(individual_series) <= 5,
+                                    key="generic_plot_individual",
+                                )
+                                if show_individual:
+                                    for name, x_plot, y_plot in individual_series:
+                                        trace_type = (
+                                            go.Scattergl
+                                            if x_kind in ("numeric", "datetime")
+                                            and y_kind in ("numeric", "datetime")
+                                            else go.Scatter
+                                        )
+                                        individual_fig = go.Figure(
+                                            trace_type(
+                                                x=x_plot,
+                                                y=y_plot,
+                                                mode="lines",
+                                                name=name,
+                                                connectgaps=False,
+                                            )
+                                        )
+                                        individual_fig.update_layout(
+                                            title=name,
+                                            xaxis_title=x_label,
+                                            yaxis_title=y_column,
+                                            hovermode="x",
+                                            margin={
+                                                "l": 20,
+                                                "r": 20,
+                                                "t": 55,
+                                                "b": 20,
+                                            },
+                                        )
+                                        st.plotly_chart(
+                                            individual_fig,
+                                            use_container_width=True,
+                                            config={
+                                                "displaylogo": False,
+                                                "scrollZoom": True,
+                                            },
+                                        )
+                        else:
+                            st.warning(
+                                "No rows have valid values for both selected axes "
+                                "within the chosen range."
+                            )
+                    with st.expander("Preview detected columns and sample rows"):
+                        st.caption(
+                            f"`{selected_files[0]}` · "
+                            f"{len(selected_frames[selected_files[0]]):,} rows · "
+                            f"{len(selected_frames[selected_files[0]].columns):,} columns"
+                        )
+                        st.dataframe(
+                            selected_frames[selected_files[0]].head(10),
+                            use_container_width=True,
+                        )
+    elif plot_csv_uploads:
+        st.warning("None of the uploaded CSV files could be read.")
     else:
-        st.info("Upload one or more Instron or multimeter CSV files to plot their traces.")
+        st.info("Upload one or more CSV files to choose their X and Y columns and plot them.")
 elif instron_dict and dmm_dict:
     st.subheader("Configure Specimens for Comparison")
     num_tests = st.number_input("Number of specimens/tests to compare", min_value=1, max_value=50, value=1)

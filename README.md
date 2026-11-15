@@ -8,7 +8,7 @@ A Streamlit application for synchronizing tensile-test data with multimeter resi
 - Identify and route uploaded files using their headers.
 - Set specimen label, linear density, gauge length, and time offset; optionally auto-align the peak load with the steepest resistance increase.
 - Review interactive relative-resistance, normalized-resistivity, damage-tracking, resistance-time, and per-specimen load/resistance plots.
-- Upload separate datasets for **Full analysis** and **Plot traces only**; switching modes preserves each mode's files. Plot-only mode shows complete data by default, with an optional time cut, a combined plot, and a separate interactive plot for each trace.
+- Upload separate datasets for **Full analysis** and **Plot traces only**; switching modes preserves each mode's files. In **Plot graph**, upload arbitrary CSVs, choose detected X/Y columns, and explore complete data in interactive combined and optional per-file charts, with optional numeric or date range filtering.
 - Inspect sensor and mechanical metrics, including turning strain, gauge factor, linearity, strain resolution, work of rupture, and recovery/hysteresis where applicable.
 - Download the comparison summary as a CSV.
 
@@ -39,7 +39,7 @@ Streamlit prints a local URL (usually `http://localhost:8501`) to open in your b
 
 ## Input CSV files
 
-Upload CSV files in the app. It can route a file to the other category if its headers identify it as an Instron or multimeter export.
+Upload CSV files in the app. The **Plot graph** workspace reads standard delimited CSV files with a header row and lets you select columns for interactive plotting. For **Full analysis**, the app can route a file to the other category if its headers identify it as an Instron or multimeter export.
 
 ### Instron tensile CSV
 
