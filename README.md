@@ -22,7 +22,7 @@ A Streamlit application for synchronizing tensile-test data with multimeter resi
 ## Requirements
 
 
-Use Python 3.10–3.12 with the versions pinned in [`requirement.txt`](requirement.txt). Python 3.14 may not be compatible with all of these pinned package versions.
+Use Python 3.10–3.12 with the versions pinned in [`requirements.txt`](requirements.txt). Python 3.14 may not be compatible with all of these pinned package versions.
 
 ## Install and run
 
@@ -31,7 +31,7 @@ From the project directory, create and activate a virtual environment, then inst
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirement.txt
+python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
