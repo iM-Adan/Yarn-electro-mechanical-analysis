@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.streamlit/secrets.toml
+
+# Local experimental inputs and generated outputs
+datasets/
+experimental_data/
+data/temp/
+tmp/
+temp/
+outputs/
+*.tmp
+*.tmp.csv
